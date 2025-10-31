@@ -8,6 +8,7 @@ const { Client, LocalAuth, MessageMedia } = pkg;
 import qrcode from 'qrcode-terminal';
 import fs from 'fs';
 import puppeteer from 'puppeteer';
+import QRCode from 'qrcode';
 
 const app = express();
 const PORT = 5000;
@@ -24,6 +25,40 @@ const client = new Client({
 client.on('qr', qr => {
   console.log('📱 Scan this QR code with WhatsApp:');
   qrcode.generate(qr, { small: true });
+});
+
+let latestQR = null;
+
+// Update latest QR when WhatsApp generates it
+client.on('qr', qr => {
+  latestQR = qr; // store for web endpoint
+  console.log('📱 Scan this QR code with WhatsApp:');
+  qrcode.generate(qr, { small: true });
+});
+
+// Serve QR code as PNG in browser
+app.get('/qr', async (req, res) => {
+  try {
+    if (!latestQR) return res.status(404).send('QR code not available yet.');
+
+    const qrDataURL = await QRCode.toDataURL(latestQR);
+    // Return HTML with QR image
+    res.send(`
+      <html>
+        <head><title>Scan WhatsApp QR</title></head>
+        <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f8f9fa;">
+          <div style="text-align:center;">
+            <h2>Scan WhatsApp QR Code</h2>
+            <img src="${qrDataURL}" alt="WhatsApp QR Code" />
+            <p>Once scanned, the WhatsApp client will be ready.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('❌ Error generating QR code:', err);
+    res.status(500).send('Error generating QR code.');
+  }
 });
 
 client.on('ready', () => console.log('✅ WhatsApp client is ready!'));

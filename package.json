@@ -17,6 +17,7 @@
     "express": "^5.1.0",
     "node-html-to-image": "^5.0.0",
     "puppeteer": "^24.27.0",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
