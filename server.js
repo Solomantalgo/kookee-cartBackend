@@ -54,13 +54,20 @@ async function initializeClient() {
         // server.js (Client initialization block - Final fix)
 
         // Initialize WhatsApp client with RemoteAuth
+       // server.js (Client initialization block - The correct final fix)
+
+        // Initialize WhatsApp client with RemoteAuth
         client = new Client({
             authStrategy: new RemoteAuth({
                 store: store,
                 clientId: 'kookee-whatsapp-bot', 
                 backupSyncIntervalMs: 300000, 
+                
+                // CRITICAL FIX: Prevent RemoteAuth from trying to clean up temp files 
+                // on the ephemeral filesystem, which causes the ENOENT error.
+                deleteSessionDataOnLogout: false, 
             }),
-            // Force a known stable WhatsApp Web version (Good practice, keep this)
+            // Force a known stable WhatsApp Web version (Keep this)
             webVersionCache: {
                 type: 'remote',
                 remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
@@ -69,10 +76,7 @@ async function initializeClient() {
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox'],
                 executablePath: '/usr/bin/chromium',
-                
-                // CRITICAL FIX: Explicitly set the user data directory to /tmp
-                // This resolves ENOENT errors in ephemeral environments like Render.
-                userDataDir: '/tmp/wwebjs-session',
+                // *** Make sure userDataDir is removed! ***
             },
         });
 
