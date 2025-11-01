@@ -54,12 +54,13 @@ async function initializeClient() {
                 store: store,
                 clientId: 'kookee-whatsapp-bot', // Unique ID for your session
             }),
-            puppeteer: { 
-                headless: true,
-                // Mandatory puppeteer args for Render deployment
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
-                executablePath: '/usr/bin/chromium', // Path where we install chromium on Render
-            },
+           // ... in your client initialization
+puppeteer: { 
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    executablePath: '/usr/bin/chromium', // This path is now valid inside Docker
+},
+// ...
         });
 
         // --- Client Event Listeners ---
