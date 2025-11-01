@@ -51,18 +51,28 @@ async function initializeClient() {
       // server.js (CORRECTED CLIENT INITIALIZATION)
 
         // ✅ Initialize WhatsApp client with RemoteAuth
+        // server.js (Client initialization block - Final fix)
+
+        // Initialize WhatsApp client with RemoteAuth
         client = new Client({
-            // Use RemoteAuth Strategy
             authStrategy: new RemoteAuth({
                 store: store,
                 clientId: 'kookee-whatsapp-bot', 
-                // CRITICAL FIX: Add the backup interval, which must be >= 60000ms (1 minute)
-                backupSyncIntervalMs: 300000, // Setting it to 5 minutes
+                backupSyncIntervalMs: 300000, 
             }),
+            // Force a known stable WhatsApp Web version (Good practice, keep this)
+            webVersionCache: {
+                type: 'remote',
+                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+            },
             puppeteer: { 
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox'],
-                executablePath: '/usr/bin/chromium', 
+                executablePath: '/usr/bin/chromium',
+                
+                // CRITICAL FIX: Explicitly set the user data directory to /tmp
+                // This resolves ENOENT errors in ephemeral environments like Render.
+                userDataDir: '/tmp/wwebjs-session',
             },
         });
 
