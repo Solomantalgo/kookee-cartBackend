@@ -18,8 +18,13 @@ app.use(bodyParser.json());
 
 // ✅ Initialize WhatsApp client
 const client = new Client({
-  authStrategy: new LocalAuth(),
-  puppeteer: { headless: true },
+  authStrategy: new LocalAuth(),
+  puppeteer: { 
+        headless: true,
+        // ✅ Add these two lines for Docker deployment
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        executablePath: '/usr/bin/chromium', 
+    },
 });
 
 client.on('qr', qr => {
@@ -105,7 +110,10 @@ async function safeSendMessage(client, recipient, content) {
 app.post('/send-order', async (req, res) => {
   try {
     const recipient = '256775224728@c.us';
-    const { order } = req.body;
+     const { order } = req.body || {};   // safer destructure
+  if (!order) return res.status(400).json({ success: false, error: "No order provided" });
+  console.log('📦 Received body:', req.body);
+
 
     if (!order?.items?.length) return res.status(400).json({ success: false, error: "Invalid order data" });
     if (!client.info?.wid) return res.status(503).json({ success: false, error: "WhatsApp client not ready" });
@@ -235,4 +243,4 @@ if (customerId) allRecipients.push(customerId);
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on http://0.0.0.0:${PORT}`));

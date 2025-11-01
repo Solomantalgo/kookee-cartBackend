@@ -1,3 +1,5 @@
-# Puppeteer local Chromium
-node_modules/puppeteer/.local-chromium/
-node_modules/whatsapp-web.js/node_modules/puppeteer-core/.local-chromium/
+# Node modules
+/node_modules
+
+# WhatsApp-Web.js LocalAuth folder (always ignore, even when using RemoteAuth)
+/.wwebjs_auth
