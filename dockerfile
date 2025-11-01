@@ -2,7 +2,7 @@
 FROM node:22-slim
 
 # Install system dependencies required for Puppeteer/Chromium
-# This part replaces your failed 'apt-get install chromium' command
+# This ensures the 'chromium' binary is available at /usr/bin/chromium
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -22,12 +22,13 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /usr/src/app
 
-# Copy package files and install Node dependencies
-# We use yarn since your project uses yarn lock files
-COPY package.json yarn.lock ./
+# --- START OF CORRECTION ---
+# Copy package files (we remove 'yarn.lock' since it wasn't committed)
+COPY package.json ./
 RUN yarn install --production
+# --- END OF CORRECTION ---
 
-# Bundle app source
+# Bundle app source (server.js, etc.)
 COPY . .
 
 # Expose the port your Express app listens on
