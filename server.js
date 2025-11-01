@@ -57,28 +57,29 @@ async function initializeClient() {
        // server.js (Client initialization block - The correct final fix)
 
         // Initialize WhatsApp client with RemoteAuth
-        client = new Client({
-            authStrategy: new RemoteAuth({
-                store: store,
-                clientId: 'kookee-whatsapp-bot', 
-                backupSyncIntervalMs: 300000, 
-                
-                // CRITICAL FIX: Prevent RemoteAuth from trying to clean up temp files 
-                // on the ephemeral filesystem, which causes the ENOENT error.
-                deleteSessionDataOnLogout: false, 
-            }),
-            // Force a known stable WhatsApp Web version (Keep this)
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-            },
-            puppeteer: { 
-                headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
-                executablePath: '/usr/bin/chromium',
-                // *** Make sure userDataDir is removed! ***
-            },
-        });
+        // Initialize WhatsApp client with RemoteAuth
+client = new Client({
+    authStrategy: new RemoteAuth({
+        store: store,
+        clientId: 'kookee-whatsapp-bot', 
+        backupSyncIntervalMs: 300000, 
+        deleteSessionDataOnLogout: false, 
+    }),
+    webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+    },
+    puppeteer: { 
+        headless: true,
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            // 🎯 The stability fix for containers
+            '--no-zygote' 
+        ],
+        executablePath: '/usr/bin/chromium',
+    },
+});
 
         // --- Client Event Listeners ---
         client.on('qr', qr => {
