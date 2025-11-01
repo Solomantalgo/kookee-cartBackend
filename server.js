@@ -48,19 +48,22 @@ async function initializeClient() {
         const store = new MongoStore({ mongoose: mongoose });
 
         // ✅ Initialize WhatsApp client with RemoteAuth
+      // server.js (CORRECTED CLIENT INITIALIZATION)
+
+        // ✅ Initialize WhatsApp client with RemoteAuth
         client = new Client({
             // Use RemoteAuth Strategy
             authStrategy: new RemoteAuth({
                 store: store,
-                clientId: 'kookee-whatsapp-bot', // Unique ID for your session
+                clientId: 'kookee-whatsapp-bot', 
+                // CRITICAL FIX: Add the backup interval, which must be >= 60000ms (1 minute)
+                backupSyncIntervalMs: 300000, // Setting it to 5 minutes
             }),
-           // ... in your client initialization
-puppeteer: { 
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    executablePath: '/usr/bin/chromium', // This path is now valid inside Docker
-},
-// ...
+            puppeteer: { 
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+                executablePath: '/usr/bin/chromium', 
+            },
         });
 
         // --- Client Event Listeners ---
