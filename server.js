@@ -32,7 +32,9 @@ process.on('unhandledRejection', (reason, promise) => {
             reason.message.includes('Target closed') ||
             reason.message.includes('Session closed') ||
             reason.message.includes('Protocol error') ||
-            (reason.message.includes('ENOENT') && reason.message.includes('.wwebjs_auth'))) {
+            reason.message.includes('File not found for id') ||
+            reason.message.includes('RemoteAuth-') ||
+            (reason.message.includes('ENOENT') && (reason.message.includes('.wwebjs_auth') || reason.message.includes('.zip')))) {
             console.warn('⚠️ SUPPRESSED:', reason.message.split('\n')[0]);
             return;
         }
@@ -42,7 +44,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', (error) => {
     if (error.message && (
-        error.message.includes('ENOENT') && error.message.includes('.wwebjs_auth') ||
+        (error.message.includes('ENOENT') && (error.message.includes('.wwebjs_auth') || error.message.includes('RemoteAuth-'))) ||
         error.message.includes('Target closed') ||
         error.message.includes('Protocol error')
     )) {
@@ -65,6 +67,24 @@ function safeCleanupSessionDir() {
     }
 }
 
+// --- UTILITY: CLEAN UP CORRUPTED MONGODB SESSION ---
+async function cleanupMongoSession() {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            // Clear all RemoteAuth sessions from MongoDB
+            const collections = await mongoose.connection.db.listCollections().toArray();
+            const authCollectionExists = collections.some(col => col.name === 'auth');
+            
+            if (authCollectionExists) {
+                const result = await mongoose.connection.db.collection('auth').deleteMany({});
+                console.log(`🗑️  Cleared ${result.deletedCount} corrupted session(s) from MongoDB`);
+            }
+        }
+    } catch (err) {
+        console.warn('⚠️ Could not clean MongoDB session (ignored):', err.message);
+    }
+}
+
 // --- MAIN INITIALIZATION FUNCTION ---
 async function initializeClient() {
     if (isInitializing) {
@@ -83,10 +103,13 @@ async function initializeClient() {
         // Clean up old client instance
         if (client) {
             console.log('🔄 Cleaning up old client instance...');
-            try { 
-                await client.destroy(); 
+            try {
+                // Don't await - just fire and forget to avoid hanging
+                client.destroy().catch(e => console.warn('Destroy warning (ignored):', e.message));
+                // Give it a moment to clean up
+                await sleep(1000);
             } catch (e) { 
-                console.warn('Old client destroy warning (ignored):', e.message); 
+                console.warn('Old client cleanup warning (ignored):', e.message); 
             }
             client = null;
         }
@@ -153,14 +176,18 @@ async function initializeClient() {
             isInitializing = false;
         });
         
-        client.on('auth_failure', msg => {
+        client.on('auth_failure', async msg => {
             console.error('❌ Authentication failed:', msg);
             isInitializing = false;
             isReady = false;
-            // Session likely corrupted, clean up and retry
+            
+            // Session is corrupted - clean everything and start fresh
+            console.log('🗑️  Cleaning up corrupted session data...');
+            safeCleanupSessionDir();
+            await cleanupMongoSession();
+            
             setTimeout(() => {
                 console.log('🔄 Retrying initialization after auth failure...');
-                safeCleanupSessionDir();
                 initializeClient();
             }, 5000);
         });
@@ -170,17 +197,27 @@ async function initializeClient() {
             isInitializing = false;
             isReady = false;
             
-            // Auto-reconnect for most disconnection reasons
-            if (reason === 'NAVIGATION' || reason === 'LOGOUT') {
-                console.log('🔄 Logout/Navigation detected. Scheduling reconnection...');
+            // CRITICAL: Don't reconnect on LOGOUT - this is likely Render restarting
+            // The session is still in MongoDB, next startup will restore it
+            if (reason === 'LOGOUT') {
+                console.log('🛑 LOGOUT detected - This is likely a Render restart.');
+                console.log('💾 Session is saved in MongoDB and will restore on next startup.');
+                console.log('⏸️  Not attempting reconnection to avoid duplicate sessions.');
+                safeCleanupSessionDir();
+                return; // DON'T reconnect - let Render handle the restart
+            }
+            
+            // For other disconnections (NAVIGATION, CONNECTION_LOST, etc.)
+            if (reason === 'NAVIGATION') {
+                console.log('🔄 Navigation detected. Scheduling reconnection...');
                 safeCleanupSessionDir();
                 setTimeout(() => {
                     console.log('🔄 Attempting reconnection...');
                     initializeClient();
                 }, 3000);
             } else {
-                // For other disconnections, try immediate reconnect
-                console.log('🔄 Attempting immediate reconnection...');
+                // For unexpected disconnections, try immediate reconnect
+                console.log('🔄 Unexpected disconnection. Attempting immediate reconnection...');
                 setTimeout(() => initializeClient(), 1000);
             }
         });
@@ -313,6 +350,42 @@ app.get('/health', (req, res) => {
         push_name: client?.info?.pushname || null,
     };
     res.json(status);
+});
+
+// Manual session reset endpoint (for debugging)
+app.post('/reset-session', async (req, res) => {
+    try {
+        console.log('🔄 Manual session reset requested...');
+        
+        // Destroy current client
+        if (client) {
+            try {
+                await client.destroy();
+            } catch (e) {
+                console.warn('Client destroy error (ignored):', e.message);
+            }
+            client = null;
+        }
+        
+        // Clean up everything
+        safeCleanupSessionDir();
+        await cleanupMongoSession();
+        
+        // Reinitialize
+        isReady = false;
+        isInitializing = false;
+        latestQR = null;
+        
+        setTimeout(() => initializeClient(), 2000);
+        
+        res.json({ 
+            success: true, 
+            message: 'Session reset initiated. Visit /qr to scan new QR code in a few seconds.' 
+        });
+    } catch (error) {
+        console.error('❌ Error resetting session:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // Utility functions
