@@ -1,4 +1,4 @@
-// ✅ server.js - CORRECTED FOR RENDER WITH REMOTEAUTH AND STABILITY FIXES
+// ✅ server.js - UPDATED FOR AUTOMATIC RECOVERY AND LATEST W-W.JS BEST PRACTICES
 
 import express from 'express';
 import bodyParser from 'body-parser';
@@ -39,7 +39,7 @@ process.on('unhandledRejection', (reason, promise) => {
     }
     // Log other unhandled rejections
     console.error('❌ UNHANDLED REJECTION:', reason.message, promise);
-    // You may decide to exit here for other severe errors: 
+    // For other severe errors, you might still want to exit: 
     // process.exit(1); 
 });
 // --- END CRASH GUARD RAIL ---
@@ -53,6 +53,12 @@ async function initializeClient() {
     }
     
     try {
+        if (client) {
+             // 💡 IMPORTANT: If re-initializing, clean up the old instance
+            try { await client.destroy(); } catch (e) { console.warn('Old client destroy failed (ignored):', e.message); }
+            client = null;
+        }
+
         console.log('🔗 Attempting to connect to MongoDB...');
         await mongoose.connect(MONGODB_URI);
         console.log('✅ Connected to MongoDB!');
@@ -61,6 +67,10 @@ async function initializeClient() {
 
         // ✅ Initialize WhatsApp client with RemoteAuth (Stability fixes applied)
         client = new Client({
+            // ✨ ADDED: This is a critical option for RemoteAuth
+            // It automatically destroys and re-initializes the client on auth_failure,
+            // which is the common way to trigger a new QR after a disconnection/session-loss.
+            restartOnAuthFail: true, 
             authStrategy: new RemoteAuth({
                 store: store,
                 clientId: 'kookee-whatsapp-bot', 
@@ -68,11 +78,12 @@ async function initializeClient() {
                 // CRITICAL FIX: Prevent RemoteAuth from trying to clean up temp files 
                 deleteSessionDataOnLogout: false, 
             }),
-            // Force a known stable WhatsApp Web version (Keep this)
+            // Force a known stable WhatsApp Web version (Updated to a more recent one as of current knowledge)
+            // Use 'latest' or a more recent version from wppconnect if the current version fails
             webVersionCache: {
                 type: 'remote',
-               remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2413.51.html',
-                // Check if 2.2413.51.html or newer is more stable if this version fails
+                // Updated to a newer, recommended format/version for better stability
+                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1029270264.html',
             },
             puppeteer: { 
                 headless: true,
@@ -83,6 +94,7 @@ async function initializeClient() {
                     '--no-zygote',
                     '--disable-gpu',
                     '--disable-dev-shm-usage',
+                    '--single-process', // Added for better stability in limited container environments
                 ],
                 executablePath: '/usr/bin/chromium',
             },
@@ -95,10 +107,29 @@ async function initializeClient() {
             qrcode.generate(qr, { small: true });
         });
 
-        client.on('ready', () => console.log('✅ WhatsApp client is ready!'));
-        client.on('auth_failure', msg => console.error('❌ Auth failed:', msg));
-        // The LOGOUT event is what triggers the subsequent crash, this logs it:
-        client.on('disconnected', reason => console.log('⚠️ Client disconnected:', reason));
+        client.on('ready', () => {
+            console.log('✅ WhatsApp client is ready!');
+            latestQR = null; // Clear QR when ready
+        });
+        
+        // This handler fires when the session is invalid and cannot be restored.
+        // With restartOnAuthFail: true, this should trigger an automatic restart.
+        client.on('auth_failure', msg => {
+            console.error('❌ Auth failed:', msg);
+        });
+        
+        // --- ADDED: Disconnect/Logout handler for manual recovery fallback ---
+        client.on('disconnected', async reason => {
+            console.log('⚠️ Client disconnected:', reason);
+            // If restartOnAuthFail: true fails, or for a complete logout, 
+            // the best practice is to manually destroy and re-initialize.
+            if (reason !== 'unauthorized') { // 'unauthorized' is often part of the auth_failure cycle
+                console.log('Attempting to re-initialize client after unexpected disconnection...');
+                await initializeClient(); // Recursive call to re-run the setup
+            }
+        });
+        // --- END ADDED HANDLER ---
+        
         client.on('remote_session_saved', () => console.log('✅ Session saved to MongoDB.'));
 
         // --- Start the client ---
@@ -107,6 +138,10 @@ async function initializeClient() {
 
     } catch (error) {
         console.error('❌ Error during client initialization:', error);
+        // Add a delay before retrying to prevent rapid-fire retries on persistent errors
+        console.log('Retrying client initialization in 10 seconds...');
+        await sleep(10000); 
+        await initializeClient(); 
     }
 }
 
@@ -115,29 +150,44 @@ initializeClient();
 // --- END MAIN INITIALIZATION FUNCTION ---
 
 
-// --- REST OF YOUR EXISTING CODE ---
+// --- REST OF YOUR EXISTING CODE (No changes needed here) ---
 
 // Serve QR code as PNG in browser
 app.get('/qr', async (req, res) => {
-  try {
-    if (!latestQR) return res.status(404).send('QR code not available yet. Please wait.');
-    const qrDataURL = await QRCode.toDataURL(latestQR);
-    res.send(`
-      <html>
-        <head><title>Scan WhatsApp QR</title></head>
-        <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f8f9fa;">
-          <div style="text-align:center;">
-            <h2>Scan WhatsApp QR Code</h2>
-            <img src="${qrDataURL}" alt="WhatsApp QR Code" />
-            <p>Once scanned, the WhatsApp client will be ready. **Access this page via the Render public URL!**</p>
-          </div>
-        </body>
-      </html>
-    `);
-  } catch (err) {
-    console.error('❌ Error generating QR code:', err);
-    res.status(500).send('Error generating QR code.');
-  }
+    try {
+        // Show a message if the client is ready but no QR is available (as it should be ready)
+        if (!latestQR && client && client.info?.wid) {
+            return res.status(200).send(`
+                <html><head><title>WhatsApp Status</title></head>
+                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#e9ffed;">
+                    <div style="text-align:center;padding:20px;border:1px solid #c3e6cb;border-radius:8px;background:#d4edda;color:#155724;">
+                        <h2>✅ WhatsApp Client is Ready!</h2>
+                        <p>No QR code is currently required or available.</p>
+                        <p><strong>Access this page via the Render public URL!</strong></p>
+                    </div>
+                </body></html>
+            `);
+        }
+        
+        if (!latestQR) return res.status(404).send('QR code not available yet. Please wait.');
+        
+        const qrDataURL = await QRCode.toDataURL(latestQR);
+        res.send(`
+            <html>
+                <head><title>Scan WhatsApp QR</title></head>
+                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f8f9fa;">
+                    <div style="text-align:center;">
+                        <h2>Scan WhatsApp QR Code</h2>
+                        <img src="${qrDataURL}" alt="WhatsApp QR Code" />
+                        <p>Once scanned, the WhatsApp client will be ready. **Access this page via the Render public URL!**</p>
+                    </div>
+                </body>
+            </html>
+        `);
+    } catch (err) {
+        console.error('❌ Error generating QR code:', err);
+        res.status(500).send('Error generating QR code.');
+    }
 });
 
 // Utility: sleep
@@ -147,7 +197,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function formatPhoneNumber(number) {
     if (!number) return null;
     number = number.replace(/\D/g, '');        // remove non-digits
-    if (number.startsWith('0')) number = '256' + number.slice(1); // add country code
+    // Assuming '0' prefix is a local number needing a country code (e.g., '256' for Uganda, as per the current context being in Uganda)
+    if (number.startsWith('0')) number = '256' + number.slice(1); 
     return number + '@c.us';
 }
 
