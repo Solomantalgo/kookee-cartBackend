@@ -27,7 +27,11 @@ let isReady = false;
 // --- ENHANCED CRASH GUARD RAIL ---
 process.on('unhandledRejection', (reason, promise) => {
     if (reason && reason.message) {
+        // Suppress common Puppeteer/WhatsApp errors that don't affect functionality
         if (reason.message.includes('Execution context was destroyed') ||
+            reason.message.includes('Target closed') ||
+            reason.message.includes('Session closed') ||
+            reason.message.includes('Protocol error') ||
             (reason.message.includes('ENOENT') && reason.message.includes('.wwebjs_auth'))) {
             console.warn('⚠️ SUPPRESSED:', reason.message.split('\n')[0]);
             return;
@@ -37,7 +41,11 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 process.on('uncaughtException', (error) => {
-    if (error.message && error.message.includes('ENOENT') && error.message.includes('.wwebjs_auth')) {
+    if (error.message && (
+        error.message.includes('ENOENT') && error.message.includes('.wwebjs_auth') ||
+        error.message.includes('Target closed') ||
+        error.message.includes('Protocol error')
+    )) {
         console.warn('⚠️ SUPPRESSED EXCEPTION:', error.message.split('\n')[0]);
         return;
     }
