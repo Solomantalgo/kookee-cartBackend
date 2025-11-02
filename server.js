@@ -1,4 +1,4 @@
-// ✅ server.js - FIXED SESSION CLEANUP ERRORS
+// ✅ server.js - FIXED SESSION PERSISTENCE & RENDER STABILITY
 
 import express from 'express';
 import bodyParser from 'body-parser';
@@ -8,7 +8,6 @@ import pkg from 'whatsapp-web.js';
 const { Client, RemoteAuth, MessageMedia } = pkg; 
 import qrcode from 'qrcode-terminal';
 import fs from 'fs';
-import puppeteer from 'puppeteer';
 import QRCode from 'qrcode';
 import mongoose from 'mongoose';
 import { MongoStore } from 'wwebjs-mongo'; 
@@ -22,14 +21,14 @@ app.use(bodyParser.json());
 const MONGODB_URI = process.env.MONGODB_URI;
 let client = null;
 let latestQR = null;
-let isInitializing = false; // Prevent concurrent initializations
+let isInitializing = false;
+let isReady = false;
 
 // --- ENHANCED CRASH GUARD RAIL ---
 process.on('unhandledRejection', (reason, promise) => {
     if (reason && reason.message) {
-        // Suppress common non-critical errors
         if (reason.message.includes('Execution context was destroyed') ||
-            reason.message.includes('ENOENT') && reason.message.includes('.wwebjs_auth')) {
+            (reason.message.includes('ENOENT') && reason.message.includes('.wwebjs_auth'))) {
             console.warn('⚠️ SUPPRESSED:', reason.message.split('\n')[0]);
             return;
         }
@@ -44,7 +43,6 @@ process.on('uncaughtException', (error) => {
     }
     console.error('❌ UNCAUGHT EXCEPTION:', error);
 });
-// --- END ENHANCED GUARD RAIL ---
 
 // --- UTILITY: SAFE DIRECTORY CLEANUP ---
 function safeCleanupSessionDir() {
@@ -58,11 +56,9 @@ function safeCleanupSessionDir() {
         console.warn('⚠️ Could not clean session dir (ignored):', err.message);
     }
 }
-// --- END UTILITY ---
 
 // --- MAIN INITIALIZATION FUNCTION ---
 async function initializeClient() {
-    // Prevent multiple concurrent initializations
     if (isInitializing) {
         console.log('⏳ Initialization already in progress, skipping...');
         return;
@@ -82,135 +78,189 @@ async function initializeClient() {
             try { 
                 await client.destroy(); 
             } catch (e) { 
-                console.warn('Old client destroy failed (ignored):', e.message); 
+                console.warn('Old client destroy warning (ignored):', e.message); 
             }
             client = null;
         }
 
-        // Clean up local session files to prevent ENOENT errors
+        // Clean up local session files
         safeCleanupSessionDir();
 
         console.log('🔗 Connecting to MongoDB...');
+        
+        // Only connect if not already connected
         if (mongoose.connection.readyState === 0) {
-            await mongoose.connect(MONGODB_URI);
+            await mongoose.connect(MONGODB_URI, {
+                useNewUrlParser: true,
+                useUnifiedTopology: true,
+            });
         }
         console.log('✅ Connected to MongoDB!');
 
         const store = new MongoStore({ mongoose: mongoose });
 
-        // ✅ Initialize WhatsApp client with fixed RemoteAuth config
+        console.log('🔍 Checking for existing session in MongoDB...');
+
+        // ✅ Initialize WhatsApp client with proper RemoteAuth
         client = new Client({
-            restartOnAuthFail: true,
             authStrategy: new RemoteAuth({
                 store: store,
-                clientId: 'kookee-whatsapp-bot',
-                backupSyncIntervalMs: 300000,
-                // ✨ CRITICAL FIX: Set to 'remote' to avoid local file operations
-                dataPath: undefined, // Don't use local storage
+                clientId: 'kookee-whatsapp-bot', // This MUST stay consistent
+                backupSyncIntervalMs: 60000, // Sync every minute (reduced from 5 min)
             }),
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1029270264.html',
-            },
             puppeteer: { 
                 headless: true,
                 args: [
                     '--no-sandbox', 
                     '--disable-setuid-sandbox',
-                    '--no-zygote',
-                    '--disable-gpu',
                     '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--no-first-run',
+                    '--no-zygote',
                     '--single-process',
+                    '--disable-extensions',
                 ],
-                executablePath: '/usr/bin/chromium',
+                executablePath: process.env.CHROME_BIN || '/usr/bin/chromium',
             },
         });
 
         // --- Event Listeners ---
         client.on('qr', qr => {
             latestQR = qr;
+            isReady = false;
             console.log('📱 QR RECEIVED. Scan this with WhatsApp:');
             qrcode.generate(qr, { small: true });
+            console.log(`\n🌐 Or visit: ${process.env.RENDER_EXTERNAL_URL || 'http://localhost:' + PORT}/qr\n`);
+        });
+
+        client.on('authenticated', () => {
+            console.log('✅ AUTHENTICATED - Session will be saved to MongoDB');
         });
 
         client.on('ready', () => {
-            console.log('✅ WhatsApp client is ready!');
+            console.log('✅ WhatsApp client is READY!');
+            console.log('📱 Connected as:', client.info.pushname);
             latestQR = null;
+            isReady = true;
             isInitializing = false;
         });
         
         client.on('auth_failure', msg => {
-            console.error('❌ Auth failed:', msg);
+            console.error('❌ Authentication failed:', msg);
             isInitializing = false;
+            isReady = false;
+            // Session likely corrupted, clean up and retry
+            setTimeout(() => {
+                console.log('🔄 Retrying initialization after auth failure...');
+                safeCleanupSessionDir();
+                initializeClient();
+            }, 5000);
         });
         
         client.on('disconnected', async reason => {
             console.log('⚠️ Client disconnected:', reason);
             isInitializing = false;
+            isReady = false;
             
-            // Only auto-reconnect for unexpected disconnections
+            // Auto-reconnect for most disconnection reasons
             if (reason === 'NAVIGATION' || reason === 'LOGOUT') {
-                console.log('Manual logout detected. Cleaning up and waiting for manual restart...');
+                console.log('🔄 Logout/Navigation detected. Scheduling reconnection...');
                 safeCleanupSessionDir();
-                // Optionally: schedule a delayed re-initialization
                 setTimeout(() => {
-                    console.log('🔄 Attempting automatic reconnection after logout...');
+                    console.log('🔄 Attempting reconnection...');
                     initializeClient();
-                }, 5000);
+                }, 3000);
+            } else {
+                // For other disconnections, try immediate reconnect
+                console.log('🔄 Attempting immediate reconnection...');
+                setTimeout(() => initializeClient(), 1000);
             }
         });
         
         client.on('remote_session_saved', () => {
-            console.log('✅ Session saved to MongoDB.');
+            console.log('💾 Session saved to MongoDB successfully');
+        });
+
+        client.on('loading_screen', (percent, message) => {
+            console.log('⏳ Loading...', percent + '%', message);
         });
 
         // --- Start the client ---
+        console.log('🚀 Starting WhatsApp client initialization...');
         await client.initialize();
-        console.log('WhatsApp client initialization started...');
 
     } catch (error) {
         console.error('❌ Error during client initialization:', error.message);
         isInitializing = false;
         
-        // Clean up before retry
         safeCleanupSessionDir();
         
-        console.log('Retrying client initialization in 10 seconds...');
+        console.log('⏰ Retrying client initialization in 10 seconds...');
         await sleep(10000); 
         await initializeClient(); 
     }
 }
 
-// Run initialization
-initializeClient();
-// --- END INITIALIZATION ---
-
 // --- API ENDPOINTS ---
+
+app.get('/', (req, res) => {
+    res.send(`
+        <html>
+            <head><title>Kookee WhatsApp Bot</title></head>
+            <body style="font-family: Arial; padding: 40px; background: #f5f5f5;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                    <h1 style="color: #25D366;">🍪 Kookee WhatsApp Bot</h1>
+                    <p><strong>Status:</strong> ${isReady ? '✅ Connected' : '⏳ Initializing...'}</p>
+                    <hr>
+                    <h3>Available Endpoints:</h3>
+                    <ul>
+                        <li><a href="/qr">📱 QR Code (Scan to Connect)</a></li>
+                        <li><a href="/health">💚 Health Check</a></li>
+                        <li>POST /send-order (Send WhatsApp Messages)</li>
+                    </ul>
+                </div>
+            </body>
+        </html>
+    `);
+});
 
 app.get('/qr', async (req, res) => {
     try {
-        if (!latestQR && client && client.info?.wid) {
+        if (isReady && !latestQR) {
             return res.status(200).send(`
-                <html><head><title>WhatsApp Status</title></head>
-                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#e9ffed;">
-                    <div style="text-align:center;padding:20px;border:1px solid #c3e6cb;border-radius:8px;background:#d4edda;color:#155724;">
-                        <h2>✅ WhatsApp Client is Ready!</h2>
-                        <p>No QR code is currently required or available.</p>
-                        <p><strong>Connected and ready to send messages!</strong></p>
-                    </div>
-                </body></html>
+                <html>
+                    <head>
+                        <title>WhatsApp Status</title>
+                        <meta http-equiv="refresh" content="10">
+                    </head>
+                    <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#e9ffed;">
+                        <div style="text-align:center;padding:40px;border:2px solid #25D366;border-radius:12px;background:#d4edda;color:#155724;">
+                            <h1>✅ WhatsApp Connected!</h1>
+                            <p style="font-size:18px;">Bot is ready to send messages</p>
+                            <p style="color:#666;">Connected as: <strong>${client?.info?.pushname || 'Unknown'}</strong></p>
+                            <hr>
+                            <p><small>This page refreshes every 10 seconds</small></p>
+                        </div>
+                    </body>
+                </html>
             `);
         }
         
         if (!latestQR) {
             return res.status(404).send(`
-                <html><head><title>WhatsApp Status</title></head>
-                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#fff3cd;">
-                    <div style="text-align:center;padding:20px;border:1px solid #ffc107;border-radius:8px;background:#fff3cd;color:#856404;">
-                        <h2>⏳ Waiting for QR Code...</h2>
-                        <p>Please refresh this page in a few seconds.</p>
-                    </div>
-                </body></html>
+                <html>
+                    <head>
+                        <title>WhatsApp Status</title>
+                        <meta http-equiv="refresh" content="5">
+                    </head>
+                    <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#fff3cd;">
+                        <div style="text-align:center;padding:40px;border:2px solid #ffc107;border-radius:12px;background:#fff3cd;color:#856404;">
+                            <h2>⏳ Checking for existing session...</h2>
+                            <p>Please wait while we restore your connection.</p>
+                            <p><small>This page auto-refreshes every 5 seconds</small></p>
+                        </div>
+                    </body>
+                </html>
             `);
         }
         
@@ -221,12 +271,20 @@ app.get('/qr', async (req, res) => {
                     <title>Scan WhatsApp QR</title>
                     <meta http-equiv="refresh" content="30">
                 </head>
-                <body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f8f9fa;">
-                    <div style="text-align:center;">
-                        <h2>Scan WhatsApp QR Code</h2>
-                        <img src="${qrDataURL}" alt="WhatsApp QR Code" style="max-width:400px;" />
-                        <p>Once scanned, the WhatsApp client will be ready.</p>
-                        <p><small>This page auto-refreshes every 30 seconds</small></p>
+                <body style="display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f8f9fa;padding:20px;">
+                    <div style="text-align:center;background:white;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.1);">
+                        <h1 style="color:#25D366;">📱 Scan WhatsApp QR Code</h1>
+                        <div style="margin:30px 0;">
+                            <img src="${qrDataURL}" alt="WhatsApp QR Code" style="max-width:400px;border:2px solid #ddd;border-radius:8px;" />
+                        </div>
+                        <ol style="text-align:left;max-width:400px;margin:20px auto;">
+                            <li>Open WhatsApp on your phone</li>
+                            <li>Tap Menu or Settings</li>
+                            <li>Tap Linked Devices</li>
+                            <li>Tap Link a Device</li>
+                            <li>Scan this QR code</li>
+                        </ol>
+                        <p style="color:#666;"><small>⏱ Auto-refreshes every 30 seconds</small></p>
                     </div>
                 </body>
             </html>
@@ -237,13 +295,14 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
     const status = {
         server: 'running',
-        whatsapp: client && client.info?.wid ? 'connected' : 'disconnected',
+        whatsapp: isReady ? 'connected' : 'disconnected',
         qr_available: !!latestQR,
-        initializing: isInitializing
+        initializing: isInitializing,
+        phone_number: client?.info?.wid?._serialized || null,
+        push_name: client?.info?.pushname || null,
     };
     res.json(status);
 });
@@ -265,40 +324,66 @@ async function safeSendMessage(client, recipient, content) {
         await sleep(800); 
     } catch (err) {
         console.error(`❌ Failed to send message to ${recipient}:`, err.message);
+        throw err;
     }
 }
 
 // Main order route
 app.post('/send-order', async (req, res) => {
     try {
-        if (!client || !client.info?.wid) {
+        if (!isReady || !client?.info?.wid) {
             return res.status(503).json({ 
                 success: false, 
-                error: "WhatsApp client not ready. Check /qr endpoint to scan QR code." 
+                error: "WhatsApp client not ready. Visit /qr to scan QR code." 
             });
         }
         
-        // Your order processing logic here
         const { customerPhone, orderDetails } = req.body;
         
         if (!customerPhone) {
-            return res.status(400).json({ success: false, error: "customerPhone is required" });
+            return res.status(400).json({ 
+                success: false, 
+                error: "customerPhone is required" 
+            });
         }
         
         const recipient = formatPhoneNumber(customerPhone);
-        const message = `New Order:\n${JSON.stringify(orderDetails, null, 2)}`;
+        const message = `🍪 *New Order from Kookee*\n\n${JSON.stringify(orderDetails, null, 2)}`;
         
         await safeSendMessage(client, recipient, message);
         
-        res.json({ success: true, message: "Order sent successfully" });
+        res.json({ 
+            success: true, 
+            message: "Order sent successfully",
+            recipient: customerPhone
+        });
     } catch (error) {
         console.error('❌ Error sending order:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+    console.log('📴 SIGTERM received, shutting down gracefully...');
+    if (client) {
+        await client.destroy();
+    }
+    if (mongoose.connection.readyState === 1) {
+        await mongoose.connection.close();
+    }
+    process.exit(0);
+});
+
+// Start server
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
-    console.log(`📱 QR Code available at: http://0.0.0.0:${PORT}/qr`);
-    console.log(`💚 Health check at: http://0.0.0.0:${PORT}/health`);
+    console.log(`📱 QR Code at: ${process.env.RENDER_EXTERNAL_URL || 'http://localhost:' + PORT}/qr`);
+    console.log(`💚 Health check at: /health`);
 });
+
+// Initialize WhatsApp client
+initializeClient();
